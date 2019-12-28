@@ -30,7 +30,7 @@ def find_best_prime_spec(n, c, min_p):
             K = Zmod(p)
             R = PolynomialRing(K, 'z')
             z = R.gen()
-            if (z^19 - K(c)).is_irreducible():
+            if (z^n - K(c)).is_irreducible():
                 return p
         p = p - 2*n
     return 0
