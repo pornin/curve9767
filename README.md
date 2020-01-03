@@ -24,7 +24,7 @@ and constant-time hash-to-curve.
 
 All the details about the field choice, curve choice, and involved
 algorithms, are detailed in the accompanying
-[whitepaper](extra/curve9767.pdf).
+[whitepaper](doc/curve9767.pdf).
 
 ## Source Code
 
