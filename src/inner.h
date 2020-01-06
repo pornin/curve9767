@@ -37,7 +37,7 @@
  * 32-bit alignment.
  */
 typedef union {
-	uint16_t v[19];
+	uint16_t v[20];
 	uint32_t w[10];
 } field_element;
 

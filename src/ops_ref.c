@@ -146,7 +146,8 @@ mp_frommonty(uint32_t x)
 	 * (Experimentally, the 3654952486 bound is exact; applying the
 	 * expression below on 3654952487 yields the wrong result.)
 	 */
-	return 1 + ((((uint32_t)(x * P1I) >> 16) * P) >> 16);
+	return 1 + ((((uint32_t)(x * (uint32_t)P1I) >> 16)
+		* (uint32_t)P) >> 16);
 }
 
 /*
@@ -1780,6 +1781,8 @@ curve9767_inner_window_put(window_point8 *window,
 {
 	memcpy(&window->v[(k << 1) + 0], Q->x, sizeof Q->x);
 	memcpy(&window->v[(k << 1) + 1], Q->y, sizeof Q->y);
+	window->v[(k << 1) + 0].v[19] = 0;
+	window->v[(k << 1) + 1].v[19] = 0;
 }
 
 /* see inner.h */
@@ -1820,8 +1823,8 @@ curve9767_inner_window_lookup(curve9767_point *Q,
 	/*
 	 * Return the point.
 	 */
-	memcpy(Q->x, x.v, sizeof x.v);
-	memcpy(Q->y, y.v, sizeof y.v);
+	memcpy(Q->x, x.v, sizeof Q->x);
+	memcpy(Q->y, y.v, sizeof Q->y);
 }
 
 /* see inner.h */
