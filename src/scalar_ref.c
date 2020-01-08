@@ -331,6 +331,11 @@ uint32_t
 curve9767_scalar_decode_strict(curve9767_scalar *s, const void *src, size_t len)
 {
 	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	s->v.w16[17] = 0;
+
+	/*
 	 * Decode the first 252 bits into a value.
 	 */
 	scalar_decode_trunc(s->v.w16, src, len);
@@ -363,6 +368,11 @@ curve9767_scalar_decode_strict(curve9767_scalar *s, const void *src, size_t len)
 void
 curve9767_scalar_decode_reduce(curve9767_scalar *s, const void *src, size_t len)
 {
+	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	s->v.w16[17] = 0;
+
 	/*
 	 * Principle: we decode the input by chunks of 31 bytes, in
 	 * big-endian order (the bytes are in little-endian order, but we
@@ -462,6 +472,11 @@ void
 curve9767_scalar_add(curve9767_scalar *c,
 	const curve9767_scalar *a, const curve9767_scalar *b)
 {
+	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	c->v.w16[17] = 0;
+
 	scalar_add(c->v.w16, a->v.w16, b->v.w16);
 }
 
@@ -470,6 +485,11 @@ void
 curve9767_scalar_sub(curve9767_scalar *c,
 	const curve9767_scalar *a, const curve9767_scalar *b)
 {
+	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	c->v.w16[17] = 0;
+
 	scalar_sub(c->v.w16, a->v.w16, b->v.w16);
 }
 
@@ -477,6 +497,11 @@ curve9767_scalar_sub(curve9767_scalar *c,
 void
 curve9767_scalar_neg(curve9767_scalar *c, const curve9767_scalar *a)
 {
+	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	c->v.w16[17] = 0;
+
 	scalar_sub(c->v.w16, curve9767_scalar_zero.v.w16, a->v.w16);
 }
 
@@ -486,6 +511,11 @@ curve9767_scalar_mul(curve9767_scalar *c,
 	const curve9767_scalar *a, const curve9767_scalar *b)
 {
 	uint16_t t[17];
+
+	/*
+	 * Set dummy alignment word (to appease some sanitizing tools).
+	 */
+	c->v.w16[17] = 0;
 
 	scalar_mmul(t, a->v.w16, sR2);
 	scalar_mmul(c->v.w16, t, b->v.w16);
