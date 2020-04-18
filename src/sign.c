@@ -89,3 +89,25 @@ curve9767_sign_verify(const void *sig,
 	}
 	return r & ((w - 1) >> 31);
 }
+
+/* see curve9767.h */
+int
+curve9767_sign_verify_vartime(const void *sig,
+	const curve9767_point *Q,
+	const char *hash_oid, const void *hv, size_t hv_len)
+{
+	curve9767_scalar d, e;
+	curve9767_point C;
+	const uint8_t *buf;
+
+	buf = sig;
+	if (!curve9767_point_decode(&C, buf)) {
+		return 0;
+	}
+	if (!curve9767_scalar_decode_strict(&d, buf + 32, 32)) {
+		return 0;
+	}
+	make_e(&e, buf, Q, hash_oid, hv, hv_len);
+	curve9767_scalar_neg(&e, &e);
+	return curve9767_point_verify_mul_mulgen_add_vartime(Q, &e, &d, &C);
+}

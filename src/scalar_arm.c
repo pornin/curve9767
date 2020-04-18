@@ -56,12 +56,17 @@ static const uint16_t sD[] = {
 
 /* see curve9767.h */
 const curve9767_scalar curve9767_scalar_zero = {
-	{ { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+	{ { 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
 };
 
 /* see curve9767.h */
 const curve9767_scalar curve9767_scalar_one = {
-	{ { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+	{ { 1, 0, 0, 0, 0, 0, 0, 0, 0 } }
+};
+
+/* see curve9767.h */
+const curve9767_scalar curve9767_scalar_two128 = {
+	{ { 0, 0, 0, 0, 256, 0, 0, 0, 0 } }
 };
 
 /*
@@ -536,39 +541,44 @@ curve9767_scalar_condcopy(curve9767_scalar *d,
 
 /*
  * For lattice basis reduction, we use an other representation with
- * 30-bit limbs, in 32-bit words (top two bits of each word are always
- * 0). There are "small integers" (that fit on 5 limbs), and "large
- * integers" (that use 17 limbs). These values are signed; two's
- * complement is used for negative values.
+ * 32-bit limbs, in 32-bit words. We have 128-bit integers (4 limbs)
+ * and 512-bit integers (16 limbs); these values are signed.
  */
 
 /*
- * Convert a value from 15-bit limbs to 30-bit limbs (small value). The
- * source value must contain at least 10 limbs; exactly five 30-bit
- * limbs are produced (source value is truncated).
+ * Convert a value from 15-bit limbs to int128 (with truncation).
  */
 static void
-to_small(uint32_t *d, const uint16_t *a)
+to_int128(uint32_t *d, const uint16_t *a)
 {
-	int i;
-
-	for (i = 0; i < 5; i ++) {
-		d[i] = (uint32_t)a[i << 1] + ((uint32_t)a[(i << 1) + 1] << 15);
-	}
+	d[0] = (uint32_t)a[0]
+		| ((uint32_t)a[1] << 15)
+		| ((uint32_t)a[2] << 30);
+	d[1] = ((uint32_t)a[2] >> 2)
+		| ((uint32_t)a[3] << 13)
+		| ((uint32_t)a[4] << 28);
+	d[2] = ((uint32_t)a[4] >> 4)
+		| ((uint32_t)a[5] << 11)
+		| ((uint32_t)a[6] << 26);
+	d[3] = ((uint32_t)a[6] >> 6)
+		| ((uint32_t)a[7] <<  9)
+		| ((uint32_t)a[8] << 24);
 }
 
 /*
  * Multiply two nonnegative integers in unsigned 15-bit limb
- * representation, without any modular reduction. Result is a large
- * integer. Source values must be less than or equal to the curve
- * order n.
+ * representation, without any modular reduction. Result is a 512-bit
+ * integer.
  */
 static void
-mul15_to_large(uint32_t *d, const uint16_t *a, const uint16_t *b)
+mul15_to_int512(uint32_t *d, const uint16_t *a, const uint16_t *b)
 {
 	uint16_t t[34];
-	int i, j;
+	int i, j, k;
 
+	/*
+	 * Compute the product over 15-bit limbs.
+	 */
 	memset(t, 0, sizeof t);
 	for (i = 0; i < 17; i ++) {
 		uint32_t f, cc;
@@ -582,157 +592,108 @@ mul15_to_large(uint32_t *d, const uint16_t *a, const uint16_t *b)
 		}
 		t[i + 17] = (uint16_t)cc;
 	}
-	for (i = 0; i < 17; i ++) {
-		d[i] = (uint32_t)t[i << 1] + ((uint32_t)t[(i << 1) + 1] << 15);
-	}
-}
 
-/*
- * This macro defines a function with prototype:
- *
- *   static void name(uint32_t *a, const uint32_t *b, unsigned s)
- *
- * The 'op' parameter must be the + or the - operator. If 'op' is +,
- * then the function adds lshift(b,s) to a; otherwise, it subtracts
- * lshift(b,s) from a. Both values consist of 'size' limbs of 30 bits.
- * The result is silently truncated if it does not fit. All values of
- * s up to 74908 are supported; in practice, s will always be lower than
- * 505, and almost always be lower than 30.
- *
- * Note: '(x * 34953) >> 20' computes floor(x/30) for all x in 0..74908.
- */
-#define DEF_OP_LSHIFT(name, op, size) \
-static void \
-name(uint32_t *a, const uint32_t *b, unsigned s) \
-{ \
-	uint32_t b2[(size)]; \
-	uint32_t cc, ee; \
-	int i; \
- \
-	if (s >= 30) { \
-		unsigned k; \
- \
-		k = (unsigned)(((uint32_t)s * (uint32_t)34953) >> 20); \
-		s -= k * 30; \
-		if (k >= (size)) { \
-			return; \
-		} \
-		memset(b2, 0, k * sizeof b2[0]); \
-		memcpy(b2 + k, b, ((size) - k) * sizeof b2[0]); \
-		b = b2; \
-	} \
-	cc = 0; \
-	ee = 0; \
-	for (i = 0; i < (size); i ++) { \
-		uint32_t t, w; \
- \
-		w = b[i]; \
-		t = ((w << s) | ee) & 0x3FFFFFFF; \
-		ee = w >> (30 - s); \
-		t = a[i] op t op cc; \
-		a[i] = t & 0x3FFFFFFF; \
-		cc = t >> (31 - ((1 op 1) >> 1)); \
-	} \
-}
-
-DEF_OP_LSHIFT(add_lshift_small, +, 5)
-DEF_OP_LSHIFT(sub_lshift_small, -, 5)
-DEF_OP_LSHIFT(add_lshift_large, +, 17)
-DEF_OP_LSHIFT(sub_lshift_large, -, 17)
-
-/*
- * Get the bit length of a "large" integer. The bit length is the minimal
- * size (in bits) of the binary representation of the value, in two's
- * complement, excluding the sign bit. Notably, both 0 and -1 have bit
- * length 0.
- */
-static int
-bitlength_large(const uint32_t *x)
-{
-	uint32_t smask;
-	int i;
-
-	smask = 0x3FFFFFFF & -(x[16] >> 29);
-	for (i = 16; i >= 0; i --) {
+	/*
+	 * Reassemble the limbs into 32-bit words.
+	 */
+	memset(d, 0, 16 * sizeof(uint32_t));
+	for (i = 0; i < 34; i ++) {
 		uint32_t w;
 
-		w = x[i];
-		if (w != smask) {
-			w ^= smask;
-			i = 30 * i + 1;
-			if (w > 0xFFFF) {
-				w >>= 16;
-				i += 16;
-			}
-			if (w > 0xFF) {
-				w >>= 8;
-				i += 8;
-			}
-			if (w > 0x0F) {
-				w >>= 4;
-				i += 4;
-			}
-			if (w > 0x03) {
-				w >>= 2;
-				i += 2;
-			}
-			if (w > 0x01) {
-				i ++;
-			}
-			return i;
-		}
-	}
-	return 0;
-}
-
-/*
- * Encode a signed value (30-bit limbs) into bytes (little-endian signed
- * convention). There must be enough input limbs to cover all output
- * bytes.
- */
-static void
-encode_small(uint8_t *d, size_t d_len, const uint32_t *x)
-{
-	uint32_t acc;
-	int acc_len;
-	size_t u, v;
-
-	acc = x[0];
-	acc_len = 30;
-	v = 1;
-	for (u = 0; u < d_len; u ++) {
-		if (acc_len < 8) {
-			uint32_t w;
-
-			w = x[v ++];
-			d[u] = (uint8_t)(acc | (w << acc_len));
-			acc = w >> (8 - acc_len);
-			acc_len += 22;
-		} else {
-			d[u] = (uint8_t)acc;
-			acc >>= 8;
-			acc_len -= 8;
+		w = t[i];
+		j = 15 * i;
+		k = j & 31;
+		d[j >> 5] |= w << k;
+		if (k > 17) {
+			d[(j >> 5) + 1] |= w >> (32 - k);
 		}
 	}
 }
 
 /*
- * Compare two large values: this function returns 1 if x is numerically
- * strictly lower than y, 0 otherwise. The two operands MUST be
- * nonnegative.
+ * Generic add with a shifted operand. This function is called from
+ * the assembly code when the shift count is 32 or more. It is rarely
+ * called in practice, and thus its performance does not matter much.
+ *
+ * Values a and b consist of 'len' limbs of 32 bits. Value b, left-shifted
+ * by s bits, is added to a.
  */
-static int
-ult_large(const uint32_t *x, const uint32_t *y)
+void
+curve9767_inner_add_lshift(uint32_t *a, const uint32_t *b, int len, int s)
 {
-	uint32_t cc;
-	int i;
+	uint32_t cca, ddb, eeb;
+	int i, j, k, nk;
 
-	cc = 0;
-	for (i = 0; i < 17; i ++) {
-		cc = (uint32_t)(x[i] - y[i] - cc) >> 31;
+	if (s >= (len << 5)) {
+		return;
 	}
-	return (int)cc;
+
+	cca = 0;
+	ddb = 0;
+	k = s & 31;
+	if (k == 0) {
+		nk = 0;
+		eeb = 0;
+	} else {
+		nk = 32 - k;
+		eeb = (uint32_t)-1;
+	}
+	for (i = 0, j = s >> 5; j < len; i ++, j ++) {
+		uint32_t wa, wb, wt;
+
+		wa = a[j];
+		wb = b[i];
+		wt = (wb << k) | ddb;
+		ddb = (wb >> nk) & eeb;
+		wa += wt + cca;
+		cca = cca ? (wa <= wt) : (wa < wt);
+		a[j] = wa;
+	}
 }
+
+/*
+ * Generic subtract with a shifted operand. This function is called from
+ * the assembly code when the shift count is 32 or more. It is rarely
+ * called in practice, and thus its performance does not matter much.
+ *
+ * Values a and b consist of 'len' limbs of 32 bits. Value b, left-shifted
+ * by s bits, is subtracted from a.
+ */
+void
+curve9767_inner_sub_lshift(uint32_t *a, const uint32_t *b, int len, int s)
+{
+	uint32_t cca, ddb, eeb;
+	int i, j, k, nk;
+
+	if (s >= (len << 5)) {
+		return;
+	}
+
+	cca = 0;
+	ddb = 0;
+	k = s & 31;
+	if (k == 0) {
+		nk = 0;
+		eeb = 0;
+	} else {
+		nk = 32 - k;
+		eeb = (uint32_t)-1;
+	}
+	for (i = 0, j = s >> 5; j < len; i ++, j ++) {
+		uint32_t wa, wb, wt;
+
+		wa = a[j];
+		wb = b[i];
+		wt = (wb << k) | ddb;
+		ddb = (wb >> nk) & eeb;
+		wt = wa - wt - cca;
+		cca = cca ? (wt >= wa) : (wt > wa);
+		a[j] = wt;
+	}
+}
+
+/* Implemented in assembly. */
+void curve9767_inner_reduce_basis_vartime_core(uint32_t *tab);
 
 /* see inner.h */
 void
@@ -740,114 +701,66 @@ curve9767_inner_reduce_basis_vartime(
 	uint8_t *c0, uint8_t *c1, const curve9767_scalar *b)
 {
 	uint16_t bw[17];
-	uint32_t u0_tab[5], u1_tab[5], v0_tab[5], v1_tab[5];
-	uint32_t nu_tab[17], nv_tab[17], sp[17];
-	uint32_t *u0, *u1, *v0, *v1, *nu, *nv;
+	uint32_t tab[4 * 4 + 3 * 16];
+	int i;
 
 	/*
-	 * 1 in "large" format. Also valid as "small" format (by
-	 * using only the 9 first words).
+	 * n mod 2^128, followed by: 0 mod 2^128.
 	 */
-	static const uint32_t one_large[17] = {
-		1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	static const uint32_t init_n_zero[] = {
+		1697078897, 4214354342, 1098638491, 861044341, 0, 0, 0, 0
 	};
 
 	/*
-	 * n^2 in "large" format.
+	 * n^2, over 512 bits.
 	 */
-	static const uint32_t order_squared_large[17] = {
-		323300833, 275074172, 172260179,   3118812, 465268366,
-		340941917, 888453332, 493731906, 660202842, 568099908,
-		778829796, 396023345, 631383276, 208310379, 427453880,
-		918983080,  13077574
+	static const uint32_t init_n2[] = {
+		323300833,  874074911, 1889814453, 2382413403,
+		391887726, 2370114711,   17518411, 3847910839,
+		554772313, 3221112951, 1800980198, 2720328798,
+		446962405, 2544294787, 3675932321,   13077574
 	};
 
 	/*
-	 * We use pointers so that swaps are efficient.
-	 */
-	u0 = u0_tab;
-	u1 = u1_tab;
-	v0 = v0_tab;
-	v1 = v1_tab;
-	nu = nu_tab;
-	nv = nv_tab;
-
-	/*
-	 * Init:
-	 *   u = [n, 0]
-	 *   v = [b, 1]
+	 * Load values into tab[]:
+	 *   index   size
+	 *     0       4     u0 = n
+	 *     4       4     u1 = 0
+	 *     8       4     v0 = b
+	 *    12       4     v1 = 1
+	 *    16      16     nu = n^2
+	 *    32      16     nv = b^2+1
+	 *    48      16     sp = b*n
 	 */
 	scalar_normalize(bw, b->v.w16);
-	to_small(u0, order);
-	memset(u1, 0, 5 * sizeof(uint32_t));
-	to_small(v0, bw);
-	memcpy(v1, one_large, 5 * sizeof(uint32_t));
+	memcpy(tab, init_n_zero, sizeof init_n_zero);
+	to_int128(tab + 8, bw);
+	tab[12] = 1;
+	tab[13] = 0;
+	tab[14] = 0;
+	tab[15] = 0;
+	memcpy(tab + 16, init_n2, sizeof init_n2);
+	mul15_to_int512(tab + 32, bw, bw);
+	for (i = 0; i < 16; i ++) {
+		uint32_t w;
 
-	/*
-	 * nu = <u,u> = n^2
-	 * nv = <v,v> = b^2 + 1
-	 * sp = <u,v> = n*b
-	 */
-	memcpy(nu, order_squared_large, 17 * sizeof(uint32_t));
-	mul15_to_large(nv, bw, bw);
-	add_lshift_large(nv, one_large, 0);
-	mul15_to_large(sp, order, bw);
-
-	/*
-	 * Main loop:
-	 *  - If nu < nv, then swap(u,v) and swap(nu,nv).
-	 *  - If bitlength(nv) <= 253, then success (v = [c0, c1]).
-	 *  - Set s <- max(0, bitlength(sp) - bitlength(nv))
-	 *  - If sp > 0, then:
-	 *       u <- u - lshift(v, s)
-	 *       nu <- nu + lshift(nv, 2*s) - lshift(sp, s+1)
-	 *       sp <- sp - lshift(nv, s)
-	 *    Else:
-	 *       u <- u + lshift(v, s)
-	 *       nu <- nu + lshift(nv, 2*s) + lshift(sp, s+1)
-	 *       sp <- sp + lshift(nv, s)
-	 */
-	for (;;) {
-		int s;
-
-		if (ult_large(nu, nv)) {
-
-#define SWAP(x, y)   do { \
-		uint32_t *tmp = (x); \
-		(x) = (y); \
-		(y) = tmp; \
-	} while (0)
-
-			SWAP(u0, v0);
-			SWAP(u1, v1);
-			SWAP(nu, nv);
-
-#undef SWAP
-
-		}
-
-		s = bitlength_large(nv);
-		if (s <= 253) {
-			encode_small(c0, 16, v0);
-			encode_small(c1, 16, v1);
-			return;
-		}
-		s = bitlength_large(sp) - s;
-		if (s < 0) {
-			s = 0;
-		}
-		if ((sp[16] >> 29) == 0) {
-			sub_lshift_small(u0, v0, s);
-			sub_lshift_small(u1, v1, s);
-			add_lshift_large(nu, nv, 2 * s);
-			sub_lshift_large(nu, sp, s + 1);
-			sub_lshift_large(sp, nv, s);
-		} else {
-			add_lshift_small(u0, v0, s);
-			add_lshift_small(u1, v1, s);
-			add_lshift_large(nu, nv, 2 * s);
-			add_lshift_large(nu, sp, s + 1);
-			add_lshift_large(sp, nv, s);
+		w = tab[32 + i] + 1;
+		tab[32 + i] = w;
+		if (w != 0) {
+			break;
 		}
 	}
+	mul15_to_int512(tab + 48, bw, order);
+
+	/*
+	 * Core computation is implemented in assembly.
+	 */
+	curve9767_inner_reduce_basis_vartime_core(tab);
+
+	/*
+	 * Encode the result (v0 and v1) into the output buffers. Since
+	 * we work on little-endian systems, a simple copy is fine.
+	 */
+	memcpy(c0, tab + 8, 16);
+	memcpy(c1, tab + 12, 16);
 }

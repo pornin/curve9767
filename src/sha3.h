@@ -1,5 +1,5 @@
-#ifndef SHAKE_H__
-#define SHAKE_H__
+#ifndef SHA3_H__
+#define SHA3_H__
 
 #ifdef __cplusplus
 extern "C" {

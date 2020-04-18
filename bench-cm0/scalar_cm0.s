@@ -1,0 +1,1 @@
+../src/scalar_cm0.s

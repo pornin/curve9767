@@ -9,7 +9,7 @@ INCDIR = ../libopencm3/include
 LIBDIR = ../libopencm3/lib
 LDSCRIPT = stm32f4-discovery.ld
 
-OBJ = curve9767.o ecdh.o hash.o keygen.o ops_arm.o scalar_ref.o ops_cm4.o sha3_cm4.o sign.o timing.o
+OBJ = curve9767.o ecdh.o hash.o keygen.o ops_arm.o scalar_arm.o scalar_cm4.o ops_cm4.o sha3_cm4.o sign.o timing.o
 
 all: timing.elf
 
@@ -40,8 +40,11 @@ ops_arm.o: ops_arm.c curve9767.h inner.h sha3.h
 ops_cm4.o: ops_cm4.s
 	$(CC) $(CFLAGS) -c -o ops_cm4.o ops_cm4.s
 
-scalar_ref.o: scalar_ref.c curve9767.h inner.h sha3.h
-	$(CC) $(CFLAGS) -c -o scalar_ref.o scalar_ref.c
+scalar_arm.o: scalar_arm.c curve9767.h inner.h sha3.h
+	$(CC) $(CFLAGS) -c -o scalar_arm.o scalar_arm.c
+
+scalar_cm4.o: scalar_cm4.s
+	$(CC) $(CFLAGS) -c -o scalar_cm4.o scalar_cm4.s
 
 sha3_cm4.o: sha3_cm4.c sha3.h
 	$(CC) $(CFLAGS) -c -o sha3_cm4.o sha3_cm4.c

@@ -4,7 +4,7 @@ LD = arm-linux-gcc
 LDFLAGS =
 LIBS =
 
-OBJ = curve9767.o ecdh.o hash.o keygen.o ops_arm.o scalar_ref.o ops_cm0.o sha3.o sign.o test_curve9767.o
+OBJ = curve9767.o ecdh.o hash.o keygen.o ops_arm.o ops_cm0.o scalar_arm.o scalar_cm0.o sha3.o sign.o test_curve9767.o
 
 test_curve9767: $(OBJ)
 	$(LD) $(LDFLAGS) -o test_curve9767 $(OBJ) $(LIBS)
@@ -30,8 +30,11 @@ ops_arm.o: ops_arm.c curve9767.h inner.h sha3.h
 ops_cm0.o: ops_cm0.s
 	$(CC) $(CFLAGS) -c -o ops_cm0.o ops_cm0.s
 
-scalar_ref.o: scalar_ref.c curve9767.h inner.h sha3.h
-	$(CC) $(CFLAGS) -c -o scalar_ref.o scalar_ref.c
+scalar_arm.o: scalar_arm.c curve9767.h inner.h sha3.h
+	$(CC) $(CFLAGS) -c -o scalar_arm.o scalar_arm.c
+
+scalar_cm0.o: scalar_cm0.s
+	$(CC) $(CFLAGS) -c -o scalar_cm0.o scalar_cm0.s
 
 sha3.o: sha3.c sha3.h
 	$(CC) $(CFLAGS) -c -o sha3.o sha3.c

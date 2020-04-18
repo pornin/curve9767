@@ -2050,3 +2050,654 @@ curve9767_inner_Icart_map(curve9767_point *Q, const uint16_t *u)
 	/* Set Q to the point-at-infinity if and only if u is zero. */
 	Q->neutral = gf_eq(u, curve9767_inner_gf_zero.v);
 }
+
+/*
+ * A constant scalar value, used in point multiplication algorithms.
+ */
+static const uint8_t scalar_win4_off[] = {
+	0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
+	0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
+	0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
+	0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x08
+};
+
+/*
+ * Perform a lookup in a window, based on the value of four bits, with
+ * the extra processing for the conditional negation. The value 'e' MUST
+ * be in the 0..15 range. T is set to (e-8)*B, where B is the base point
+ * of the window (the window contains the coordinates of i*B for i in
+ * 1..8).
+ *
+ * This function sets the neutral flag of T under the assumption that the
+ * base point for the window is not the point-at-infinity (i.e. the function
+ * sets T->neutral to 1 if e == 8, to 0 otherwise). It is up to the caller
+ * to adjust the flag afterwards, depending on the source parameters.
+ */
+static inline void
+do_lookup(curve9767_point *T, const window_point8 *win, uint32_t e)
+{
+	uint32_t e8, index, r;
+
+	/*
+	 * Set e8 to 1 if e == 8, to 0 otherwise.
+	 */
+	e8 = (e & -e) >> 3;
+
+	/*
+	 * If e >= 9, lookup index must be e - 9.
+	 * If e <= 7, lookup index must be 7 - e.
+	 * If e == 8, lookup index is unimportant, as long as it is in
+	 * the proper range (0..7). Code below sets index to 0 in that case.
+	 *
+	 * We set r to 1 if e <= 8, 0 otherwise. This conditions the
+	 * final negation.
+	 */
+	index = e - 9;
+	r = index >> 31;
+	index = (index ^ -r) - r;
+	index &= (e8 - 1);
+
+	curve9767_inner_window_lookup(T, win, index);
+	T->neutral = e8;
+	curve9767_inner_gf_condneg(T->y, r);
+}
+
+/* see curve9767.h */
+void
+curve9767_point_mul(curve9767_point *Q3, const curve9767_point *Q1,
+	const curve9767_scalar *s)
+{
+	/*
+	 * Algorithm:
+	 *
+	 *  - We use a window optimization: we precompute small multiples
+	 *    of Q1, and add one such small multiple every four doublings.
+	 *
+	 *  - We store only 1*Q1, 2*Q1,... 8*Q1. The point to add will
+	 *    be either one of these points, or the opposite of one of
+	 *    these points. This "shifts" the window, and must be
+	 *    counterbalanced by a constant offset applied to the scalar.
+	 *
+	 * Therefore:
+	 *
+	 *  1. Add 0x8888...888 to the scalar s, and normalize it to 0..n-1
+	 *     (we do this by encoding the scalar to bytes).
+	 *  2. Compute the window: j*Q1 (for j = 1..8).
+	 *  3. Start with point Q3 = 0.
+	 *  4. For i in 0..62:
+	 *      - Compute Q3 <- 16*Q3
+	 *      - Let e = bits[(248-4*i)..(251-4*i)] of s
+	 *      - Let: T = -(8-e)*Q1  if 0 <= e <= 7
+	 *             T = 0          if e == 8
+	 *             T = (e-8)*Q1   if 9 <= e <= 15
+	 *      - Compute Q3 <- Q3 + T
+	 *
+	 * All lookups should be done in constant-time, as well as additions
+	 * and conditional negation of T.
+	 *
+	 * For the first iteration (i == 0), since Q3 is still 0 at that
+	 * point, we can omit the multiplication by 16 and the addition,
+	 * and simply set Q3 to T.
+	 */
+	curve9767_scalar ss;
+	uint8_t sb[32];
+	curve9767_point T;
+	window_point8 window;
+	int i;
+	uint32_t qz;
+
+	/*
+	 * Apply offset on the scalar and encode it into bytes. This
+	 * involves normalization to 0..n-1.
+	 */
+	curve9767_scalar_decode_strict(&ss,
+		scalar_win4_off, sizeof scalar_win4_off);
+	curve9767_scalar_add(&ss, &ss, s);
+	curve9767_scalar_encode(sb, &ss);
+
+	/*
+	 * Create window contents.
+	 */
+	T = *Q1;
+	for (i = 1; i <= 8; i ++) {
+		if (i != 1) {
+			curve9767_point_add(&T, &T, Q1);
+		}
+		curve9767_inner_window_put(&window, &T, i - 1);
+	}
+
+	/*
+	 * Perform the chunk-by-chunk computation.
+	 */
+	qz = Q1->neutral;
+	for (i = 0; i < 63; i ++) {
+		uint32_t e;
+
+		/*
+		 * Extract exponent bits.
+		 */
+		e = (sb[(62 - i) >> 1] >> (((62 - i) & 1) << 2)) & 0x0F;
+
+		/*
+		 * Window lookup. Don't forget to adjust the neutral flag
+		 * to account for the case of Q1 = infinity.
+		 */
+		do_lookup(&T, &window, e);
+		T.neutral |= qz;
+
+		/*
+		 * Q3 <- 16*Q3 + T.
+		 *
+		 * If i == 0, then we know that Q3 is (conceptually) 0,
+		 * and we can simply set Q3 to T.
+		 */
+		if (i == 0) {
+			*Q3 = T;
+		} else {
+			curve9767_point_mul2k(Q3, Q3, 4);
+			curve9767_point_add(Q3, Q3, &T);
+		}
+	}
+}
+
+/* see curve9767.h */
+void
+curve9767_point_mulgen(curve9767_point *Q3, const curve9767_scalar *s)
+{
+	/*
+	 * We apply the same algorithm as curve9767_point_mul(), but
+	 * with four 64-bit scalars instead of one 252-bit scalar,
+	 * thus mutualizing the point doublings. This requires four
+	 * precomputed windows (each has size 640 bytes, hence these
+	 * tables account for 2560 bytes of ROM/Flash, which is
+	 * tolerable).
+	 */
+	curve9767_scalar ss;
+	uint8_t sb[32];
+	curve9767_point T;
+	int i;
+
+	/*
+	 * Apply offset on the scalar and encode it into bytes. This
+	 * involves normalization to 0..n-1.
+	 */
+	curve9767_scalar_decode_strict(&ss,
+		scalar_win4_off, sizeof scalar_win4_off);
+	curve9767_scalar_add(&ss, &ss, s);
+	curve9767_scalar_encode(sb, &ss);
+
+	/*
+	 * Perform the chunk-by-chunk computation. For each iteration,
+	 * we use 4 chunks of 4 bits from the scalar, to make 4 lookups
+	 * in the relevant precomputed windows.
+	 *
+	 * Since the source scalar is 252 bits, not 256 bits, the first
+	 * loop iteration will not make a lookup in the highest window
+	 * (the lookup bits are statically known to be 0). We specialize
+	 * that first iteration out of the loop.
+	 */
+	do_lookup(Q3, &curve9767_inner_window_G, sb[7] >> 4);
+	do_lookup(&T, &curve9767_inner_window_G64, sb[15] >> 4);
+	curve9767_point_add(Q3, Q3, &T);
+	do_lookup(&T, &curve9767_inner_window_G128, sb[23] >> 4);
+	curve9767_point_add(Q3, Q3, &T);
+
+	for (i = 1; i < 16; i ++) {
+		uint32_t e0, e1, e2, e3;
+		int j;
+
+		/*
+		 * Extract exponent bits.
+		 */
+		j = ((i + 1) & 1) << 2;
+		e0 = (sb[(15 - i) >> 1] >> j) & 0x0F;
+		e1 = (sb[(31 - i) >> 1] >> j) & 0x0F;
+		e2 = (sb[(47 - i) >> 1] >> j) & 0x0F;
+		e3 = (sb[(63 - i) >> 1] >> j) & 0x0F;
+
+		/*
+		 * Window lookups and additions.
+		 */
+		curve9767_point_mul2k(Q3, Q3, 4);
+		do_lookup(&T, &curve9767_inner_window_G, e0);
+		curve9767_point_add(Q3, Q3, &T);
+		do_lookup(&T, &curve9767_inner_window_G64, e1);
+		curve9767_point_add(Q3, Q3, &T);
+		do_lookup(&T, &curve9767_inner_window_G128, e2);
+		curve9767_point_add(Q3, Q3, &T);
+		do_lookup(&T, &curve9767_inner_window_G192, e3);
+		curve9767_point_add(Q3, Q3, &T);
+	}
+}
+
+/* see curve9767.h */
+void
+curve9767_point_mul_mulgen_add(curve9767_point *Q3,
+	const curve9767_point *Q1, const curve9767_scalar *s1,
+	const curve9767_scalar *s2)
+{
+	curve9767_scalar ss;
+	uint8_t sb1[32], sb2[32];
+	curve9767_point T;
+	window_point8 window;
+	int i;
+	uint32_t qz;
+
+	/*
+	 * Apply offset on both scalars and encode them into bytes. This
+	 * involves normalization to 0..n-1.
+	 */
+	curve9767_scalar_decode_strict(&ss,
+		scalar_win4_off, sizeof scalar_win4_off);
+	curve9767_scalar_add(&ss, &ss, s1);
+	curve9767_scalar_encode(sb1, &ss);
+	curve9767_scalar_decode_strict(&ss,
+		scalar_win4_off, sizeof scalar_win4_off);
+	curve9767_scalar_add(&ss, &ss, s2);
+	curve9767_scalar_encode(sb2, &ss);
+
+	/*
+	 * Create window contents (for Q1).
+	 */
+	T = *Q1;
+	for (i = 1; i <= 8; i ++) {
+		if (i != 1) {
+			curve9767_point_add(&T, &T, Q1);
+		}
+		curve9767_inner_window_put(&window, &T, i - 1);
+	}
+
+	/*
+	 * Perform the chunk-by-chunk computation.
+	 */
+	qz = Q1->neutral;
+	for (i = 0; i < 63; i ++) {
+		uint32_t e;
+
+		/*
+		 * Lookup for Q1. Don't forget to adjust the neutral flag
+		 * of T, in case Q1 = infinity.
+		 */
+		e = (sb1[(62 - i) >> 1] >> (((62 - i) & 1) << 2)) & 0x0F;
+		do_lookup(&T, &window, e);
+		T.neutral |= qz;
+		if (i == 0) {
+			*Q3 = T;
+		} else {
+			curve9767_point_mul2k(Q3, Q3, 4);
+			curve9767_point_add(Q3, Q3, &T);
+		}
+
+		/*
+		 * Lookup for G.
+		 */
+		e = (sb2[(62 - i) >> 1] >> (((62 - i) & 1) << 2)) & 0x0F;
+		do_lookup(&T, &curve9767_inner_window_G, e);
+		curve9767_point_add(Q3, Q3, &T);
+	}
+}
+
+/*
+ * Input: c is a 128-bit signed integer, in signed little-endian encoding
+ * (16 bytes).
+ * This function replaces c with |c|. Returned value is 1 if c was negative,
+ * 0 if it was 0 or positive.
+ * NOT CONSTANT-TIME
+ */
+static int
+abs_i128(uint8_t *c)
+{
+	int i;
+	unsigned cc;
+
+	if (c[15] < 0x80) {
+		return 0;
+	}
+	cc = 1;
+	for (i = 0; i < 16; i ++) {
+		unsigned w;
+
+		w = c[i];
+		w = (w ^ 0xFF) + cc;
+		c[i] = (uint8_t)w;
+		cc = w >> 8;
+	}
+	return 1;
+}
+
+/*
+ * Prepare NAF_w recoding. Given c[] of length 'len' bytes (unsigned
+ * little-endian encoding, top bit of last byte must be zero), this
+ * function computes the position of the non-zero NAF_w coefficients
+ * and writes them as ones into the rcbf[] bit field (8*len bits).
+ */
+static void
+prepare_recode_NAF(uint8_t *rcbf, const uint8_t *c, size_t len, int w)
+{
+	unsigned acc, mask1, mask2;
+	int acc_len;
+	size_t u, v;
+
+	acc = 0;
+	acc_len = 0;
+	u = 0;
+	memset(rcbf, 0, len);
+	mask1 = 1u << (w - 1);
+	mask2 = ~((1u << w) - 1u);
+	for (v = 0; v < (len << 3); v ++) {
+		if (acc_len < w && u < len) {
+			acc += (unsigned)c[u ++] << acc_len;
+			acc_len += 8;
+		}
+		if ((acc & 1) != 0) {
+			acc += acc & mask1;
+			acc &= mask2;
+			rcbf[v >> 3] |= 1u << (v & 7);
+		}
+		acc >>= 1;
+		acc_len --;
+	}
+}
+
+static const field_element window_odd5_G[] = {
+	/* 1 */
+	{ { 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,
+	    9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,    0 } },
+	{ { 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,
+	    9767, 9767, 9767, 9767, 5183, 9767, 9767, 9767, 9767,    0 } },
+	/* 3 */
+	{ { 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,  827,  976,
+	    9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,    0 } },
+	{ { 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767, 9767,
+	    9767, 9767, 3199, 3986, 5782, 9767, 9767, 9767, 9767,    0 } },
+	/* 5 */
+	{ { 2210, 6805, 8708, 6537, 3884, 7962, 4288, 4962, 1643, 1027,
+	     137, 7547, 2061,  633, 7731, 4163, 5253, 3525, 7420,    0 } },
+	{ { 4545, 6304, 4229, 2572, 2696, 9639,  630,  626, 6761, 3512,
+	    9591, 6690, 4265, 1077, 2897, 7052, 9297, 7036, 4309,    0 } },
+	/* 7 */
+	{ { 6201, 1567, 2635, 4915, 7852, 5478,   89, 4059, 8126, 5599,
+	    4473, 5182, 7517, 1411, 1170, 3882, 7734, 7033, 6451,    0 } },
+	{ { 8131, 3939, 3355, 1142,  657, 7366, 9633, 3902, 3550, 2644,
+	    9114, 7251, 7760, 3809, 9435, 1813, 3885, 3492, 3881,    0 } },
+	/* 9 */
+	{ {  363, 8932, 3221, 8711, 6270, 2703, 5538, 7030, 7675, 4644,
+	     635,  606, 6910, 6333, 3475, 2179, 1877, 3507, 8687,    0 } },
+	{ { 9675, 9445, 1940, 4624, 8972, 5163, 2711, 9537, 4839, 9654,
+	    9763, 2611, 7206, 1457, 4841,  640, 2748,  696, 1806,    0 } },
+	/* 11 */
+	{ { 7650, 9241,  962, 2228, 1594, 3577, 6783, 9424, 1599, 2635,
+	    8045, 1344, 4828, 5684, 4114, 1156, 7682, 5903, 9381,    0 } },
+	{ { 9077,   79, 3130, 1773, 7395, 5472, 9573, 3901, 3315, 6687,
+	    1029,  225, 8685, 9176, 1656, 8364, 9267, 7339, 8610,    0 } },
+	/* 13 */
+	{ { 4629,  168, 5989, 6341, 7443, 1266, 1254, 4985, 6529, 4344,
+	    6293, 3899, 5915, 6215, 8149, 6016, 5667, 9333, 1047,    0 } },
+	{ { 1029, 1598, 6939, 3680, 2190, 4891, 7700, 1863, 7734, 2594,
+	    7503, 6411, 1286, 3129, 8966,  980, 9457, 6898, 6219,    0 } },
+	/* 15 */
+	{ { 9512, 9233, 4182, 1978, 7278, 5606, 9663, 8472,  639, 3390,
+	    5480, 9279, 2692, 3295, 7832, 6774, 9345, 1616, 1767,    0 } },
+	{ { 4559, 1683, 7874, 2533, 1353, 1371, 6394, 7339, 7591, 3800,
+	    1677,   78, 9681, 1379, 4305, 7061,  529, 9533, 9374,    0 } },
+};
+
+static const field_element window_odd5_G128[] = {
+	/* 1 */
+	{ {  380,  263, 4759, 4097,  181,  189, 5006, 4610, 9254, 6379,
+	    6272, 5845, 9415, 3047, 1596, 8881, 7183, 5423, 2235,    0 } },
+	{ { 6163, 9431, 4357, 9676, 4711, 5555, 3662, 5607, 2967, 7973,
+	    4860, 4592, 6575, 7155, 1170, 4774, 1910, 5227, 2442,    0 } },
+	/* 3 */
+	{ { 6654, 5694, 4667, 1476, 4683, 5380, 6665, 3646, 4183, 6378,
+	    1804, 3321, 6321, 2515, 3203,  463, 9604, 7417, 4611,    0 } },
+	{ { 3296, 9223, 7168, 8235, 3896, 2560, 2981, 7937, 4510, 5427,
+	     108, 2987, 6512, 2105, 5825, 2720, 2364, 1742, 7087,    0 } },
+	/* 5 */
+	{ { 3733, 2716, 7734,  246,  636, 4902, 6509, 5967, 3480,  387,
+	      31, 7474, 6791, 8214,  733, 9550,   13,  941,  897,    0 } },
+	{ { 7173, 4712, 7342, 8073, 5986, 3164, 7062, 8929, 5495, 1703,
+	      98, 4721, 4988, 5517,  609, 8663, 5716, 4256, 2286,    0 } },
+	/* 7 */
+	{ { 1209, 1752, 8277, 2095, 2861, 3406, 9001, 7385, 1214, 8626,
+	    1568, 8438, 9444, 2164,  109, 5503,  880, 5453, 5670,    0 } },
+	{ {  145, 1939, 1647, 4249,  400, 8246, 8978, 6814, 6635, 8142,
+	    3097, 3837, 4908, 8642,  423, 2757, 6341, 2466, 2473,    0 } },
+	/* 9 */
+	{ { 6631, 7588, 1952, 4374, 8217, 8672, 5188, 1936, 7566,  375,
+	    6815, 7315, 3722, 4584, 8873, 6057,  489, 5733, 1093,    0 } },
+	{ { 1229, 7837,  739, 5943, 3608, 5875, 6885,  726, 4885, 3608,
+	    1216, 4182,  357, 2637, 7653, 1176, 4836, 9068, 5765,    0 } },
+	/* 11 */
+	{ { 4654, 3775, 6645, 6370, 5153, 5726, 8294, 5693, 1114, 5363,
+	    8356, 1933, 2539, 2708, 9116, 8695,  169, 3959, 7314,    0 } },
+	{ { 9451, 7628, 8982, 5735, 4808, 8199, 4164, 1030, 8346, 8643,
+	    5476, 9020, 2621, 5566, 7917, 6041, 3438, 8972, 2822,    0 } },
+	/* 13 */
+	{ {  943,  239, 2994, 7226, 4656, 2110, 5835, 1272, 5042, 2600,
+	     990, 5338, 3774, 7370,  234, 4208, 7439, 3914, 2208,    0 } },
+	{ { 9466, 5076, 2796, 9013, 8794, 7555, 5417, 7292, 9051, 9048,
+	    1895, 6041,  802, 6809, 7064, 5828, 7251, 3444, 6933,    0 } },
+	/* 15 */
+	{ { 1304, 2731, 6661, 9618, 7689,  121,  991, 1683, 5627, 3143,
+	    2891, 4724, 5853, 3174, 8571, 7021, 2925, 5461,  409,    0 } },
+	{ { 8072, 5485, 6915, 5742, 5583, 1904, 8913,  678, 9327, 6739,
+	    7675, 1134, 7284, 8485, 7235, 1210, 2261, 6781,  360,    0 } },
+};
+
+/* see inner.h */
+void
+curve9767_inner_mul2_mulgen_add_vartime(curve9767_point *Q3,
+	const curve9767_point *Q0, const uint8_t *c0, int neg0,
+	const curve9767_point *Q1, const uint8_t *c1, int neg1,
+	const uint8_t *c2)
+{
+	uint8_t rcbf0[16], rcbf1[16], rcbf2[32];
+	curve9767_point T, W0[4], W1[4];
+	int i, dbl;
+	unsigned acc0, acc1, acc2, acc3;
+
+	/*
+	 * Prepare NAF_w recoding of multipliers.
+	 */
+	prepare_recode_NAF(rcbf0, c0, 16, 4);
+	prepare_recode_NAF(rcbf1, c1, 16, 4);
+	prepare_recode_NAF(rcbf2, c2, 32, 5);
+
+	/*
+	 * Make window for Q0. If c0 is negative (neg0 == 1), we set:
+	 *   W0[k] = -(2*k+1)*Q0
+	 * Otherwise, we set:
+	 *   W0[k] = (2*k+1)*Q0
+	 */
+	W0[0] = *Q0;
+	if (neg0) {
+		curve9767_point_neg(&W0[0], &W0[0]);
+	}
+	curve9767_point_add(&T, &W0[0], &W0[0]);
+	for (i = 1; i < 4; i ++) {
+		curve9767_point_add(&W0[i], &W0[i - 1], &T);
+	}
+
+	/*
+	 * Similar window construction for Q1.
+	 */
+	W1[0] = *Q1;
+	if (neg1) {
+		curve9767_point_neg(&W1[0], &W1[0]);
+	}
+	curve9767_point_add(&T, &W1[0], &W1[0]);
+	for (i = 1; i < 4; i ++) {
+		curve9767_point_add(&W1[i], &W1[i - 1], &T);
+	}
+
+	/*
+	 * Do the window based point multiplication. Q0 and Q1 use the
+	 * computed windows W0 and W1; c2*G uses the precomputed windows
+	 * for G and (2^128)*G.
+	 * NAF_w recoding is computed on the fly, using the bits prepared
+	 * in the rcbf*[] arrays.
+	 */
+	curve9767_point_set_neutral(Q3);
+	dbl = 0;
+	acc0 = c0[15];
+	acc1 = c1[15];
+	acc2 = c2[15] | ((unsigned)c2[16] << 8);
+	acc3 = c2[31];
+	for (i = 127; i >= 0; i --) {
+		int m0, m1, m2, m3, s;
+
+		dbl ++;
+		s = (i & 7);
+		if (((rcbf0[i >> 3] >> s) & 1) != 0) {
+			m0 = (1u | (acc0 >> s)) & 0x0F;
+		} else {
+			m0 = 0;
+		}
+		if (((rcbf1[i >> 3] >> s) & 1) != 0) {
+			m1 = (1u | (acc1 >> s)) & 0x0F;
+		} else {
+			m1 = 0;
+		}
+		if (((rcbf2[i >> 3] >> s) & 1) != 0) {
+			m2 = (1u | (acc2 >> s)) & 0x1F;
+		} else {
+			m2 = 0;
+		}
+		if (((rcbf2[(i >> 3) + 16] >> s) & 1) != 0) {
+			m3 = (1u | (acc3 >> s)) & 0x1F;
+		} else {
+			m3 = 0;
+		}
+		if (s == 0 && i != 0) {
+			acc0 = (acc0 << 8) | c0[(i - 1) >> 3];
+			acc1 = (acc1 << 8) | c1[(i - 1) >> 3];
+			acc2 = (acc2 << 8) | c2[(i - 1) >> 3];
+			acc3 = (acc3 << 8) | c2[((i - 1) >> 3) + 16];
+		}
+
+		if ((m0 | m1 | m2 | m3) == 0) {
+			continue;
+		}
+		if (!Q3->neutral) {
+			curve9767_point_mul2k(Q3, Q3, dbl);
+		}
+		dbl = 0;
+
+		if (m0 != 0) {
+			if (m0 < 0x08) {
+				curve9767_point_add(Q3, Q3, &W0[m0 >> 1]);
+			} else {
+				curve9767_point_neg(&T, &W0[(16 - m0) >> 1]);
+				curve9767_point_add(Q3, Q3, &T);
+			}
+		}
+
+		if (m1 != 0) {
+			if (m1 < 0x08) {
+				curve9767_point_add(Q3, Q3, &W1[m1 >> 1]);
+			} else {
+				curve9767_point_neg(&T, &W1[(16 - m1) >> 1]);
+				curve9767_point_add(Q3, Q3, &T);
+			}
+		}
+
+		if (m2 != 0) {
+			if (m2 < 0x10) {
+				memcpy(T.x, window_odd5_G + (m2 - 1),
+					sizeof T.x);
+				memcpy(T.y, window_odd5_G + m2,
+					sizeof T.y);
+			} else {
+				memcpy(T.x, window_odd5_G + (31 - m2),
+					sizeof T.x);
+				curve9767_inner_gf_neg(T.y,
+					(window_odd5_G + (32 - m2))->v);
+			}
+			T.neutral = 0;
+			curve9767_point_add(Q3, Q3, &T);
+		}
+
+		if (m3 != 0) {
+			if (m3 < 0x10) {
+				memcpy(T.x, window_odd5_G128 + (m3 - 1),
+					sizeof T.x);
+				memcpy(T.y, window_odd5_G128 + m3,
+					sizeof T.y);
+			} else {
+				memcpy(T.x, window_odd5_G128 + (31 - m3),
+					sizeof T.x);
+				curve9767_inner_gf_neg(T.y,
+					(window_odd5_G128 + (32 - m3))->v);
+			}
+			T.neutral = 0;
+			curve9767_point_add(Q3, Q3, &T);
+		}
+	}
+
+	if (dbl > 0 && Q3->neutral == 0) {
+		curve9767_point_mul2k(Q3, Q3, dbl);
+	}
+}
+
+/* see curve9767.h */
+int
+curve9767_point_verify_mul_mulgen_add_vartime(
+	const curve9767_point *Q1, const curve9767_scalar *s1,
+	const curve9767_scalar *s2, const curve9767_point *Q2)
+{
+	/*
+	 * We want to verify:
+	 *   c1*(s1*Q1 + s2*G - Q2) = 0
+	 * For a well-chosen non-zero value c0. This equation is
+	 * equivalent to:
+	 *   (c1*s1)*Q1 + (c1*s2)*G - c1*Q2 = 0
+	 * c1*s2 mod n is a 252-bit integer, but we can split it into
+	 * two halves of 128 bits (low) and 124 bits (high) since we
+	 * have a precomputed window for (2^128)*G.
+	 *
+	 * Thus, we look for a "small" c1 such that (c1*s1 mod n) is
+	 * also "small". Reduction of a lattice basis in dimension two,
+	 * as implemented by curve9767_inner_reduce_basis_vartime(),
+	 * does exactly that, and returns c1 and c0 = c1*s1 as two
+	 * signed integers whose absolute value is less than 2^127.
+	 */
+	uint8_t c0[16], c1[16], c2[32];
+	curve9767_point T;
+	curve9767_scalar ss;
+	int neg0, neg1;
+
+	/*
+	 * Perform lattice basis reduction.
+	 */
+	curve9767_inner_reduce_basis_vartime(c0, c1, s1);
+
+	/*
+	 * Check the signs of c0 and c1, and replace them with their
+	 * absolute value.
+	 */
+	neg0 = abs_i128(c0);
+	neg1 = abs_i128(c1);
+
+	/*
+	 * Compute c1*s2 mod n and encode it.
+	 */
+	curve9767_scalar_decode_strict(&ss, c1, 16);
+	if (neg1) {
+		curve9767_scalar_neg(&ss, &ss);
+	}
+	curve9767_scalar_mul(&ss, &ss, s2);
+	curve9767_scalar_encode(c2, &ss);
+
+	/*
+	 * Compute c0*Q1 + c2*G - c1*Q2 into T.
+	 */
+	curve9767_inner_mul2_mulgen_add_vartime(
+		&T, Q1, c0, neg0, Q2, c1, 1 - neg1, c2);
+
+	/*
+	 * The equation is verified if and only if the result if the
+	 * point at infinity.
+	 */
+	return T.neutral;
+}

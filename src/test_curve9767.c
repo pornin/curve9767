@@ -1718,13 +1718,31 @@ static inline uint32_t
 mp_rand(shake_context *rng)
 {
 	for (;;) {
+		uint8_t b[4];
 		uint32_t t;
 
-		shake_extract(rng, &t, sizeof t);
+		shake_extract(rng, b, sizeof b);
+		t = (uint32_t)b[0]
+			| ((uint32_t)b[1] << 8)
+			| ((uint32_t)b[2] << 16)
+			| ((uint32_t)b[3] << 24);
 		if (t < 4294960114u) {
 			return 1 + (t % P);
 		}
 	}
+}
+
+/*
+ * Get a random scalar value. Selection is very slightly biased, but
+ * the bias is lower than 2^{-244}, hence negligible.
+ */
+static void
+scalarrand(shake_context *rng, curve9767_scalar *s)
+{
+	uint8_t tmp[62];
+
+	shake_extract(rng, tmp, sizeof tmp);
+	curve9767_scalar_decode_reduce(s, tmp, sizeof tmp);
 }
 
 static void
@@ -2457,6 +2475,62 @@ test_scalar(void)
 
 		printf(".");
 		fflush(stdout);
+	}
+
+	printf(" done.\n");
+	fflush(stdout);
+}
+
+static void
+signed_bytes_to_scalar(curve9767_scalar *s, const uint8_t *b, size_t len)
+{
+	curve9767_scalar d, m;
+	uint8_t tmp[33];
+
+	curve9767_scalar_decode_reduce(s, b, len);
+	if (len == 0 || b[len - 1] < 0x80) {
+		return;
+	}
+	memset(tmp, 0, sizeof tmp);
+	tmp[32] = 1;
+	curve9767_scalar_decode_reduce(&m, tmp, 33);
+	memset(tmp, 0, sizeof tmp);
+	tmp[len % 32] = 1;
+	curve9767_scalar_decode_reduce(&d, tmp, 32);
+	while (len >= 32) {
+		curve9767_scalar_mul(&d, &d, &m);
+		len -= 32;
+	}
+	curve9767_scalar_sub(s, s, &d);
+}
+
+static void
+test_reduce_basis(void)
+{
+	shake_context rng;
+	long ctr;
+
+	printf("Test lattice basis reduction: ");
+	fflush(stdout);
+
+	rand_init(&rng, "test_reduce_basis", 0);
+	for (ctr = 0; ctr < 20000; ctr ++) {
+		curve9767_scalar b, d0, d1;
+		uint8_t c0[16], c1[16];
+
+		scalarrand(&rng, &b);
+		curve9767_inner_reduce_basis_vartime(c0, c1, &b);
+		signed_bytes_to_scalar(&d0, c0, 16);
+		signed_bytes_to_scalar(&d1, c1, 16);
+		curve9767_scalar_mul(&b, &b, &d1);
+		if (!curve9767_scalar_eq(&b, &d0)) {
+			fprintf(stderr, "ERR: wrong reduction result\n");
+			exit(EXIT_FAILURE);
+		}
+		if ((ctr & 1023) == 0) {
+			printf(".");
+			fflush(stdout);
+		}
 	}
 
 	printf(" done.\n");
@@ -3524,6 +3598,95 @@ test_combined(void)
 	fflush(stdout);
 }
 
+static void
+test_combined_vartime(void)
+{
+	int i;
+	shake_context rng;
+
+	printf("Test combined vartime: ");
+	fflush(stdout);
+
+	rand_init(&rng, "test_combined_vartime", 0);
+	for (i = 0; i < 100; i ++) {
+		curve9767_point Q0, Q1, Q2;
+		uint8_t c0[16], c1[16], c2[32], bb0[32], bb2[32];
+		int neg0, neg1;
+		curve9767_scalar s;
+
+		/*
+		 * We create random points Q0 and Q1 (using hash-to-curve)
+		 * and random multipliers within the allowed ranges. For
+		 * the first few tests, we use special multiplier values
+		 * to exercise edge cases.
+		 */
+		curve9767_hash_to_curve(&Q0, &rng);
+		curve9767_hash_to_curve(&Q1, &rng);
+
+		shake_extract(&rng, c0, sizeof c0);
+		shake_extract(&rng, c1, sizeof c1);
+		shake_extract(&rng, c2, sizeof c2);
+		neg0 = c0[15] >> 7;
+		c0[15] &= 0x7F;
+		neg1 = c1[15] >> 7;
+		c1[15] &= 0x7F;
+		c2[31] &= 0x0F;
+
+		/*
+		 * Edge cases:
+		 *  i = 0    c0 == 0
+		 *  i = 1    c1 == 0
+		 *  i = 2    c2 == 0
+		 *  i = 3    c0 == 0 and c1 == 0
+		 *  i = 4    c0 == 0 and c2 == 0
+		 *  i = 5    c1 == 0 and c2 == 0
+		 *  i = 6    c0 == 0 and c1 == 0 and c2 == 0
+		 */
+		if (i == 0 || i == 3 || i == 4 || i == 6) {
+			memset(c0, 0, sizeof c0);
+		}
+		if (i == 1 || i == 3 || i == 5 || i == 6) {
+			memset(c1, 0, sizeof c1);
+		}
+		if (i == 2 || i == 4 || i == 5 || i == 6) {
+			memset(c2, 0, sizeof c2);
+		}
+
+		curve9767_inner_mul2_mulgen_add_vartime(&Q2,
+			&Q0, c0, neg0, &Q1, c1, neg1, c2);
+		if (!curve9767_point_encode(bb2, &Q2)) {
+			memset(bb2, 0xFF, sizeof bb2);
+		}
+
+		curve9767_scalar_decode_reduce(&s, c0, sizeof c0);
+		if (neg0) {
+			curve9767_scalar_neg(&s, &s);
+		}
+		curve9767_point_mul(&Q0, &Q0, &s);
+		curve9767_scalar_decode_reduce(&s, c1, sizeof c1);
+		if (neg1) {
+			curve9767_scalar_neg(&s, &s);
+		}
+		curve9767_point_mul(&Q1, &Q1, &s);
+		curve9767_point_add(&Q0, &Q0, &Q1);
+		curve9767_scalar_decode_reduce(&s, c2, sizeof c2);
+		curve9767_point_mulgen(&Q1, &s);
+		curve9767_point_add(&Q0, &Q0, &Q1);
+		if (!curve9767_point_encode(bb0, &Q0)) {
+			memset(bb0, 0xFF, sizeof bb0);
+		}
+		check_equals(bb2, bb0, sizeof bb2, "c0*Q0+c1*Q1+c2*G");
+
+		if (i % 4 == 0) {
+			printf(".");
+			fflush(stdout);
+		}
+	}
+
+	printf(" done.\n");
+	fflush(stdout);
+}
+
 static const char *const KAT_ECDH[] = {
 	/*
 	 * ECDH tests.
@@ -3909,7 +4072,7 @@ test_signature(void)
 	printf("Test signature: ");
 	fflush(stdout);
 
-	st = KAT_SIGN;
+	st = KAT_SIGN + 12;
 	for (;;) {
 		uint8_t seed[32], bs[32], t[32], bQ[32], sig[64];
 		uint8_t tmp[64], hv[32];
@@ -3948,11 +4111,23 @@ test_signature(void)
 			fprintf(stderr, "Signature verification failed\n");
 			exit(EXIT_FAILURE);
 		}
+		if (curve9767_sign_verify_vartime(sig, &Q,
+			CURVE9767_OID_SHA3_256, hv, sizeof hv) != 1)
+		{
+			fprintf(stderr, "Signature verification failed (2)\n");
+			exit(EXIT_FAILURE);
+		}
 		hv[0] ^= 0x01;
 		if (curve9767_sign_verify(sig, &Q,
 			CURVE9767_OID_SHA3_256, hv, sizeof hv) != 0)
 		{
 			fprintf(stderr, "Bad signature not rejected\n");
+			exit(EXIT_FAILURE);
+		}
+		if (curve9767_sign_verify_vartime(sig, &Q,
+			CURVE9767_OID_SHA3_256, hv, sizeof hv) != 0)
+		{
+			fprintf(stderr, "Bad signature not rejected (2)\n");
 			exit(EXIT_FAILURE);
 		}
 
@@ -4029,6 +4204,34 @@ test_monte_carlo(void)
 	fflush(stdout);
 }
 
+#if 0
+/* obsolete */
+static void
+test_verify_spec(void)
+{
+	uint8_t bQ[32], hv[32], sig[64];
+	curve9767_point Q;
+
+	HEXTOBIN(bQ, "5b1f9f3593174033dad8da73720dd5db8c6d05883e4d0f6e4c30639fbc7daf12");
+	HEXTOBIN(hv, "3400000000000000000000000000000000000000000000000000000000000000");
+	HEXTOBIN(sig, "c3e310687f7d9274ae858a201244e8c2a635c015fdfdb5c0838f32ec9b0be04aff5104d8af987ba957ee58e71a28d987bb970f49a95c78a1aeb8fe2e7f0c0f0d");
+
+	curve9767_point_decode(&Q, bQ);
+	if (!curve9767_sign_verify(sig,
+		&Q, CURVE9767_OID_SHA3_256, hv, sizeof hv))
+	{
+		fprintf(stderr, "ERR: verify\n");
+		exit(EXIT_FAILURE);
+	}
+	if (!curve9767_sign_verify_vartime(sig,
+		&Q, CURVE9767_OID_SHA3_256, hv, sizeof hv))
+	{
+		fprintf(stderr, "ERR: verify_vartime\n");
+		exit(EXIT_FAILURE);
+	}
+}
+#endif
+
 int
 main(void)
 {
@@ -4043,10 +4246,12 @@ main(void)
 	test_gf_sqrt();
 	test_gf_cubert();
 	test_scalar();
+	test_reduce_basis();
 	test_codec();
 	test_map_to_base();
 	test_basic();
 	test_combined();
+	test_combined_vartime();
 	test_Icart_map();
 	test_hash_to_curve();
 	test_ECDH();

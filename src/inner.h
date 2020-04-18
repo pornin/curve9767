@@ -5,6 +5,28 @@
 
 /* ==================================================================== */
 /*
+ * Scalar functions (modulo curve order n).
+ */
+
+/*
+ * Given a scalar b, compute signed integers c0 and c1 with the following
+ * characteristics:
+ *   - c1 != 0
+ *   - c0 = c1 * b mod n
+ *   - |c0| < 2^127
+ *   - |c1| < 2^127
+ * Values are encoded in signed little-endian convention, over exactly
+ * 16 bytes each.
+ *
+ * THIS FUNCTION IS NOT CONSTANT-TIME. It is meant to be used as part
+ * of Schnorr signature verification, when the signature value, the
+ * signed message, and the public key, are all assumed to be public.
+ */
+void curve9767_inner_reduce_basis_vartime(
+	uint8_t *c0, uint8_t *c1, const curve9767_scalar *b);
+
+/* ==================================================================== */
+/*
  * Finite field functions (GF(9767^19)).
  *
  * Each field element is represented as an array of 19 uint16_t values.
@@ -230,6 +252,20 @@ extern const window_point8 curve9767_inner_window_G192;
  * and alias for Q->x or Q->y).
  */
 void curve9767_inner_Icart_map(curve9767_point *Q, const uint16_t *u);
+
+/*
+ * Compute Q3 = c0*Q0 + c1*Q1 + c2*G. Value c0 is provided as an absolute
+ * value in c0[] (unsigned little-endian, over 16 bytes, value must be at
+ * most 2^127-1) and a sign (neg0 = 1 for negative, 0 for positive or zero).
+ * Value c1 is similarly provided as c1[] and neg1. Value c2 is in c2[];
+ * it is positive, encoded over exactly 32 bytes, and less than 2^252.
+ *
+ * THIS FUNCTION IS NOT CONSTANT-TIME.
+ */
+void curve9767_inner_mul2_mulgen_add_vartime(curve9767_point *Q3,
+	const curve9767_point *Q0, const uint8_t *c0, int neg0,
+	const curve9767_point *Q1, const uint8_t *c1, int neg1,
+	const uint8_t *c2);
 
 /* ==================================================================== */
 

@@ -3271,6 +3271,8 @@ gf_eq_inner:
 	ldrh	r4, [r1]
 	eors	r3, r4
 	orrs	r2, r3
+	adds	r0, #4
+	adds	r1, #4
 
 	@ Values are equal if and only if r2 is zero at this point.
 	@ Since all coefficients are in 1..p, value r2 always fits

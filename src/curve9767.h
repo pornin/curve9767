@@ -36,8 +36,8 @@
  */
 typedef struct {
 	union {
-		uint32_t w32[9];
 		uint16_t w16[18];
+		uint32_t w32[9];
 	} v;
 } curve9767_scalar;
 
@@ -114,7 +114,7 @@ void curve9767_scalar_condcopy(curve9767_scalar *d,
 	const curve9767_scalar *s, uint32_t ctl);
 
 /*
- * Statically allocated constant scalars with values zero and one.
+ * Statically allocated constant scalars with values zero, one and 2^128.
  */
 extern const curve9767_scalar curve9767_scalar_zero;
 extern const curve9767_scalar curve9767_scalar_one;
@@ -285,6 +285,26 @@ void curve9767_point_mulgen(curve9767_point *Q3, const curve9767_scalar *s);
 void curve9767_point_mul_mulgen_add(curve9767_point *Q3,
 	const curve9767_point *Q1, const curve9767_scalar *s1,
 	const curve9767_scalar *s2);
+
+/*
+ * Combined point verification: this functions verifies that:
+ *   s1*Q1+s2*G = Q2
+ * for the provided points Q1 and Q2, scalars s1 and s2, and the
+ * curve generator G. THIS FUNCTION IS NOT CONSTANT-TIME; it
+ * should be used only in situations where the source values (scalars
+ * and points) are non-secret. This is typically the case of ECDSA or
+ * Schnorr signature verification.
+ *
+ * This function uses reduction of a lattice basis in dimension two in
+ * order to remove half of the point doublings; it is on average
+ * substantially faster than curve9767_point_mul_mulgen_add().
+ *
+ * Returned value 1 on success (the equation holds), 0 on error (the
+ * equation does not hold).
+ */
+int curve9767_point_verify_mul_mulgen_add_vartime(
+	const curve9767_point *Q1, const curve9767_scalar *s1,
+	const curve9767_scalar *s2, const curve9767_point *Q2);
 
 /* ===================================================================== */
 /*
@@ -575,12 +595,28 @@ void curve9767_sign_generate(void *sig,
 	const char *hash_oid, const void *hv, size_t hv_len);
 
 /*
- * Signature verification. Signature value, Public key Q, and
+ * Signature verification. Signature value, public key Q, and
  * hashed message hv (of size hv_len bytes) are provided. The
- * signature is exactly 32 bytes in length. Returned value is 1
+ * signature is exactly 64 bytes in length. Returned value is 1
  * if the signature is correct, 0 otherwise.
  */
 int curve9767_sign_verify(const void *sig,
+	const curve9767_point *Q,
+	const char *hash_oid, const void *hv, size_t hv_len);
+
+/*
+ * Signature verification, optimized function. Signature value, public
+ * key Q, and hashed message hv (of size hv_len bytes) are provided. The
+ * signature is exactly 64 bytes in length. Returned value is 1 if the
+ * signature is correct, 0 otherwise. This function is faster than
+ * curve9767_sign_verify().
+ *
+ * THIS FUNCTION IS NOT CONSTANT-TIME. In usual contexts, this is not a
+ * problem, assuming that signature values, signed messages and public
+ * keys are not secret information. If unsure, use
+ * curve9767_sign_verify().
+ */
+int curve9767_sign_verify_vartime(const void *sig,
 	const curve9767_point *Q,
 	const char *hash_oid, const void *hv, size_t hv_len);
 
